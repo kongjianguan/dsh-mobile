@@ -160,10 +160,10 @@ class AndroidSharedStateHolder(
     var workspaceFileDownloadPurpose: String? by mutableStateOf(null)
         private set
     var completedWorkspaceFile: AndroidWorkspaceLocalFile? by mutableStateOf(null)
+        private set
 
     private val pendingChatImageReads = mutableMapOf<String, CompletableDeferred<ByteArray?>>()
     private val chatImageReadMutex = Mutex()
-        private set
     var slashCommands: SharedSlashCommandSnapshot by mutableStateOf(slashCommandStore.snapshot())
         private set
     var historyPagingSessionIds: Set<String> by mutableStateOf(emptySet())
