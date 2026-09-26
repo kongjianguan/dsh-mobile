@@ -52,7 +52,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+private const val CHAT_IMAGE_READ_TIMEOUT_MILLIS = 30_000L
 
 @Stable
 class AndroidSharedStateHolder(
@@ -156,6 +160,9 @@ class AndroidSharedStateHolder(
     var workspaceFileDownloadPurpose: String? by mutableStateOf(null)
         private set
     var completedWorkspaceFile: AndroidWorkspaceLocalFile? by mutableStateOf(null)
+
+    private val pendingChatImageReads = mutableMapOf<String, CompletableDeferred<ByteArray?>>()
+    private val chatImageReadMutex = Mutex()
         private set
     var slashCommands: SharedSlashCommandSnapshot by mutableStateOf(slashCommandStore.snapshot())
         private set
@@ -1907,16 +1914,24 @@ class AndroidSharedStateHolder(
                 withContext(Dispatchers.Main.immediate) {
                     platformError = "下载文件的本地大小校验失败"
                 }
+                completeChatImageReads(null)
                 return
             }
-            completed = AndroidWorkspaceLocalFile(
-                file = file,
-                sessionId = completion.sessionId,
-                remotePath = completion.path,
-                name = completion.name,
-                mediaType = completion.mediaType,
-                purpose = completion.purpose
-            )
+            val chatImageWaiter = pendingChatImageReads[chatImageKey(completion.sessionId, completion.path)]
+            if (chatImageWaiter != null) {
+                val bytes = runCatching { file.readBytes() }.getOrNull()
+                closeWorkspaceTemporaryFile(remove = true)
+                chatImageWaiter.complete(bytes)
+            } else {
+                completed = AndroidWorkspaceLocalFile(
+                    file = file,
+                    sessionId = completion.sessionId,
+                    remotePath = completion.path,
+                    name = completion.name,
+                    mediaType = completion.mediaType,
+                    purpose = completion.purpose
+                )
+            }
         }
 
         withContext(Dispatchers.Main.immediate) {
@@ -1935,6 +1950,44 @@ class AndroidSharedStateHolder(
         transition.request?.let { request ->
             gatewayFollowUps?.submit { appGraph.gatewayRuntime.sendRequest(request) }
         }
+        if (snapshot.lastError != null) completeChatImageReads(null)
+    }
+
+    /**
+     * 读取会话工作区内一个文件的字节，供对话正文里的图片使用。复用现有下载通道，
+     * 同一时刻只允许一个请求，失败与超时都返回 null。
+     */
+    suspend fun readWorkspaceFileBytes(sessionId: String, path: String): ByteArray? {
+        val appGraph = graph ?: return null
+        if (gatewayState.connection != GatewayConnectionState.CONNECTED) return null
+        if ("file-downloads" !in gatewayState.capabilities) return null
+        val key = chatImageKey(sessionId, path)
+        return chatImageReadMutex.withLock {
+            val waiter = CompletableDeferred<ByteArray?>()
+            pendingChatImageReads[key] = waiter
+            try {
+                appGraph.gatewayScope.launch {
+                    val transition = workspaceFileStore.download(
+                        sessionId,
+                        path,
+                        UUID.randomUUID().toString(),
+                        "preview"
+                    )
+                    if (transition.request == null) waiter.complete(null)
+                    else applyWorkspaceFileTransition(appGraph, transition)
+                }
+                withTimeoutOrNull(CHAT_IMAGE_READ_TIMEOUT_MILLIS) { waiter.await() }
+            } finally {
+                pendingChatImageReads.remove(key)
+            }
+        }
+    }
+
+    private fun chatImageKey(sessionId: String, path: String): String = "$sessionId\u0000$path"
+
+    private fun completeChatImageReads(bytes: ByteArray?) {
+        if (pendingChatImageReads.isEmpty()) return
+        pendingChatImageReads.values.toList().forEach { it.complete(bytes) }
     }
 
     private fun openWorkspaceTemporaryFile(appGraph: AndroidAppGraph, name: String) {

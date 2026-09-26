@@ -10,6 +10,8 @@ data class SessionSummary(
     val isRunning: Boolean,
     val hasUnread: Boolean,
     val agentPreset: String? = null,
+    // 会话的工作目录，用于把对话正文里的绝对图片路径换算成工作区相对路径。
+    val cwd: String? = null,
     // null 兼容旧缓存；网关列表到达后使用 Host 的 blank 标记决定历史可见性。
     val hasConversation: Boolean? = null
 ) {
@@ -119,6 +121,7 @@ object SessionListReducer {
                 lastActivityEpochSeconds = timestamp,
                 isRunning = item.running,
                 agentPreset = item.agentPreset ?: existing.agentPreset,
+                cwd = item.cwd ?: existing.cwd,
                 hasConversation = !item.blank
             ) ?: SessionSummary(
                 id = item.sessionId,
@@ -127,6 +130,7 @@ object SessionListReducer {
                 isRunning = item.running,
                 hasUnread = false,
                 agentPreset = item.agentPreset,
+                cwd = item.cwd,
                 hasConversation = !item.blank
             )
         }

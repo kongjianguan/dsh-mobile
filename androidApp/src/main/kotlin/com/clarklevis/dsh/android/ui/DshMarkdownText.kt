@@ -42,6 +42,7 @@ import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableTheme
 import io.noties.markwon.ext.tasklist.TaskListPlugin
 import io.noties.markwon.html.HtmlPlugin
+import io.noties.markwon.image.ImagesPlugin
 import io.noties.markwon.movement.MovementMethodPlugin
 import org.commonmark.node.Code
 import org.commonmark.node.ThematicBreak
@@ -67,12 +68,14 @@ internal data class DshMarkdownPalette(
 
 private data class MarkdownRenderTag(
     val source: String,
-    val palette: DshMarkdownPalette
+    val palette: DshMarkdownPalette,
+    val imageIdentity: String?
 )
 
 private data class MarkdownRenderCacheKey(
     val source: String,
-    val palette: DshMarkdownPalette
+    val palette: DshMarkdownPalette,
+    val imageIdentity: String?
 )
 
 /**
@@ -85,12 +88,17 @@ private object DshMarkdownRenderCache {
     private var sourceCharacters = 0
 
     @Synchronized
-    fun get(source: String, palette: DshMarkdownPalette): Spanned? =
-        values[MarkdownRenderCacheKey(source, palette)]
+    fun get(source: String, palette: DshMarkdownPalette, imageIdentity: String?): Spanned? =
+        values[MarkdownRenderCacheKey(source, palette, imageIdentity)]
 
     @Synchronized
-    fun put(source: String, palette: DshMarkdownPalette, rendered: Spanned): Spanned {
-        val key = MarkdownRenderCacheKey(source, palette)
+    fun put(
+        source: String,
+        palette: DshMarkdownPalette,
+        imageIdentity: String?,
+        rendered: Spanned
+    ): Spanned {
+        val key = MarkdownRenderCacheKey(source, palette, imageIdentity)
         values.remove(key)?.let { sourceCharacters -= key.source.length }
         val immutable = SpannedString(rendered)
         values[key] = immutable
@@ -107,55 +115,75 @@ private object DshMarkdownRenderCache {
 private fun renderedMarkdown(
     markwon: Markwon,
     markdown: String,
-    palette: DshMarkdownPalette
-): Spanned = DshMarkdownRenderCache.get(markdown, palette)
-    ?: DshMarkdownRenderCache.put(markdown, palette, markwon.toMarkdown(markdown))
+    palette: DshMarkdownPalette,
+    imageIdentity: String?
+): Spanned = DshMarkdownRenderCache.get(markdown, palette, imageIdentity)
+    ?: DshMarkdownRenderCache.put(
+        markdown,
+        palette,
+        imageIdentity,
+        markwon.toMarkdown(markdown)
+    )
 
 /** Markwon 的 TablePlugin 带有可变 visitor，只在单独的后台线程串行解析。 */
 private object DshAsyncMarkdownRenderer {
     private val dispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "dsh-markdown-renderer").apply { priority = Thread.MIN_PRIORITY }
     }.asCoroutineDispatcher()
-    private val markwons = mutableMapOf<DshMarkdownPalette, Markwon>()
+    private val markwons = mutableMapOf<MarkwonKey, Markwon>()
 
     suspend fun render(
         context: Context,
         markdown: String,
-        palette: DshMarkdownPalette
+        palette: DshMarkdownPalette,
+        imageScope: ChatImageScope?
     ): Spanned = withContext(dispatcher) {
-        DshMarkdownRenderCache.get(markdown, palette) ?: renderedMarkdown(
-            markwon = markwons.getOrPut(palette) { buildDshMarkwon(context, palette) },
+        DshMarkdownRenderCache.get(markdown, palette, imageScope?.identity) ?: renderedMarkdown(
+            markwon = markwons.getOrPut(MarkwonKey(palette, imageScope?.identity)) {
+                buildDshMarkwon(context, palette, imageScope)
+            },
             markdown = markdown,
-            palette = palette
+            palette = palette,
+            imageIdentity = imageScope?.identity
         )
     }
 }
 
+private data class MarkwonKey(
+    val palette: DshMarkdownPalette,
+    val imageIdentity: String?
+)
+
 internal class DshMarkdownPreloader internal constructor(
     private val context: Context,
-    private val palette: DshMarkdownPalette
+    private val palette: DshMarkdownPalette,
+    private val imageScope: ChatImageScope?
 ) {
     suspend fun preload(markdowns: List<String>) {
         markdowns.forEach { markdown ->
-            DshAsyncMarkdownRenderer.render(context, markdown, palette)
+            DshAsyncMarkdownRenderer.render(context, markdown, palette, imageScope)
         }
     }
 }
 
 @Composable
-internal fun rememberDshMarkdownPreloader(): DshMarkdownPreloader {
+internal fun rememberDshMarkdownPreloader(imageScope: ChatImageScope? = null): DshMarkdownPreloader {
     val context = LocalContext.current.applicationContext
     val palette = dshMarkdownPalette(compact = false)
-    return remember(context, palette) { DshMarkdownPreloader(context, palette) }
+    return remember(context, palette, imageScope?.identity) {
+        DshMarkdownPreloader(context, palette, imageScope)
+    }
 }
 
 /** 主线程只共享实例执行轻量的 TextView 插件回调，不参与 LazyColumn 的 Markdown 解析。 */
 private object DshMarkdownTextApplier {
-    private val markwons = mutableMapOf<DshMarkdownPalette, Markwon>()
+    private val markwons = mutableMapOf<MarkwonKey, Markwon>()
 
     @Synchronized
-    fun get(context: Context, palette: DshMarkdownPalette): Markwon =
-        markwons.getOrPut(palette) { buildDshMarkwon(context, palette) }
+    fun get(context: Context, palette: DshMarkdownPalette, imageScope: ChatImageScope?): Markwon =
+        markwons.getOrPut(MarkwonKey(palette, imageScope?.identity)) {
+            buildDshMarkwon(context, palette, imageScope)
+        }
 }
 
 @Composable
@@ -182,22 +210,24 @@ private fun dshMarkdownPalette(compact: Boolean): DshMarkdownPalette {
 internal fun DshMarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
-    compact: Boolean = false
+    compact: Boolean = false,
+    imageScope: ChatImageScope? = null
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val palette = dshMarkdownPalette(compact)
-    val markwon = remember(context.applicationContext, palette) {
-        DshMarkdownTextApplier.get(context.applicationContext, palette)
+    val markwon = remember(context.applicationContext, palette, imageScope?.identity) {
+        DshMarkdownTextApplier.get(context.applicationContext, palette, imageScope)
     }
     val textSizeSp = if (compact) 14f else 16f
     val lineSpacingExtra = with(density) { (if (compact) 2.dp else 4.dp).toPx() }
     DshRenderedMarkdownText(
         markdown = markdown,
-        rendered = renderedMarkdown(markwon, markdown, palette),
+        rendered = renderedMarkdown(markwon, markdown, palette, imageScope?.identity),
         palette = palette,
         textSizeSp = textSizeSp,
         lineSpacingExtra = lineSpacingExtra,
+        imageScope = imageScope,
         modifier = modifier
     )
 }
@@ -214,26 +244,28 @@ private data class PresentedMarkdown(
 @Composable
 internal fun DshLazyMarkdownText(
     markdown: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    imageScope: ChatImageScope? = null
 ) {
     val context = LocalContext.current.applicationContext
     val palette = dshMarkdownPalette(compact = false)
-    val markwon = remember(context, palette) {
-        DshMarkdownTextApplier.get(context, palette)
+    val imageIdentity = imageScope?.identity
+    val markwon = remember(context, palette, imageIdentity) {
+        DshMarkdownTextApplier.get(context, palette, imageScope)
     }
-    var presented by remember(palette) {
+    var presented by remember(palette, imageIdentity) {
         mutableStateOf(
             PresentedMarkdown(
                 source = markdown,
-                rendered = renderedMarkdown(markwon, markdown, palette)
+                rendered = renderedMarkdown(markwon, markdown, palette, imageIdentity)
             )
         )
     }
-    LaunchedEffect(context, markdown, palette) {
+    LaunchedEffect(context, markdown, palette, imageIdentity) {
         if (presented.source != markdown) {
             presented = PresentedMarkdown(
                 source = markdown,
-                rendered = DshAsyncMarkdownRenderer.render(context, markdown, palette)
+                rendered = DshAsyncMarkdownRenderer.render(context, markdown, palette, imageScope)
             )
         }
     }
@@ -245,6 +277,7 @@ internal fun DshLazyMarkdownText(
         palette = palette,
         textSizeSp = 16f,
         lineSpacingExtra = with(density) { 4.dp.toPx() },
+        imageScope = imageScope,
         modifier = modifier
     )
 }
@@ -256,11 +289,12 @@ private fun DshRenderedMarkdownText(
     palette: DshMarkdownPalette,
     textSizeSp: Float,
     lineSpacingExtra: Float,
+    imageScope: ChatImageScope?,
     modifier: Modifier
 ) {
     val context = LocalContext.current.applicationContext
-    val markwon = remember(context, palette) {
-        DshMarkdownTextApplier.get(context, palette)
+    val markwon = remember(context, palette, imageScope?.identity) {
+        DshMarkdownTextApplier.get(context, palette, imageScope)
     }
     AndroidView(
         factory = { viewContext ->
@@ -281,7 +315,7 @@ private fun DshRenderedMarkdownText(
             textView.setLineSpacing(lineSpacingExtra, 1f)
             textView.setTextColor(palette.textColor)
             textView.setLinkTextColor(palette.linkColor)
-            val nextTag = MarkdownRenderTag(markdown, palette)
+            val nextTag = MarkdownRenderTag(markdown, palette, imageScope?.identity)
             if (textView.tag != nextTag) {
                 markwon.setParsedMarkdown(textView, rendered)
                 textView.tag = nextTag
@@ -300,14 +334,16 @@ private fun DshRenderedMarkdownText(
 internal fun DshStreamingAwareMarkdownText(
     markdown: String,
     isStreaming: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    imageScope: ChatImageScope? = null
 ) {
-    DshLazyMarkdownText(markdown, modifier)
+    DshLazyMarkdownText(markdown, modifier, imageScope)
 }
 
 internal fun buildDshMarkwon(
     context: Context,
-    palette: DshMarkdownPalette
+    palette: DshMarkdownPalette,
+    imageScope: ChatImageScope?
 ): Markwon {
     val tableTheme = TableTheme.emptyBuilder()
         .tableBorderColor(palette.tableBorderColor)
@@ -318,7 +354,7 @@ internal fun buildDshMarkwon(
         .tableOddRowBackgroundColor(palette.tableOddRowColor)
         .build()
 
-    return Markwon.builder(context)
+    val builder = Markwon.builder(context)
         .usePlugin(CorePlugin.create())
         .usePlugin(
             object : AbstractMarkwonPlugin() {
@@ -354,7 +390,16 @@ internal fun buildDshMarkwon(
         )
         .usePlugin(HtmlPlugin.create())
         .usePlugin(MovementMethodPlugin.create(TableAwareMovementMethod.create()))
-        .build()
+
+    if (imageScope != null) {
+        builder.usePlugin(
+            ImagesPlugin.create()
+                .addSchemeHandler(ChatImageSchemeHandler(context, imageScope))
+        )
+        builder.usePlugin(ChatImageRewritePlugin(imageScope.workingDirectory))
+    }
+
+    return builder.build()
 }
 
 /**

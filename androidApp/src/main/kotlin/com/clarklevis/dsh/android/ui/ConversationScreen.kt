@@ -755,7 +755,8 @@ private fun ConversationTimeline(
             hasHistoryLoadingRow = latestHistoryLoading
         }
     }
-    val markdownPreloader = rememberDshMarkdownPreloader()
+    val chatImageScope = rememberChatImageScope(stateHolder)
+    val markdownPreloader = rememberDshMarkdownPreloader(chatImageScope)
     LaunchedEffect(listState, timelineEntries, markdownPreloader) {
         snapshotFlow {
             val visible = listState.layoutInfo.visibleItemsInfo
@@ -953,7 +954,8 @@ private fun ConversationTimeline(
                     )
                     is ConversationTimelineEntry.AssistantMarkdown -> DshLazyMarkdownText(
                         markdown = entry.markdown,
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        imageScope = chatImageScope
                     )
                     is ConversationTimelineEntry.AssistantFooter -> Box(
                         Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 12.dp)
