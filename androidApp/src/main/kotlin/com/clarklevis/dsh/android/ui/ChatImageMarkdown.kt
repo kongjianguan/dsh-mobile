@@ -70,7 +70,7 @@ internal fun markdownImageAt(textView: TextView, x: Float, y: Float): MarkdownIm
     val vertical = (y - textView.totalPaddingTop + textView.scrollY).toInt()
     if (vertical < 0 || vertical > layout.height) return null
     val line = layout.getLineForVertical(vertical)
-    val horizontal = x - textView.totalPaddingLeft + textView.scrollLeft
+    val horizontal = x - textView.totalPaddingLeft + textView.scrollX
     if (horizontal < layout.getLineLeft(line) || horizontal > layout.getLineRight(line)) return null
     val offset = layout.getOffsetForHorizontal(line, horizontal)
     val span = spanned.getSpans(

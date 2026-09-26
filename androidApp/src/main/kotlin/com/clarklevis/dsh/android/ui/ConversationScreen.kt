@@ -477,6 +477,7 @@ private fun ConversationPage(
     var bottomContentHeight by remember { mutableStateOf(160.dp) }
     var imagePreview by remember(sessionId) { mutableStateOf<ConversationImagePreviewRequest?>(null) }
     var markdownImagePreview by remember(sessionId) { mutableStateOf<MarkdownImageTap?>(null) }
+    val chatImageScope = rememberChatImageScope(stateHolder)
     var isPinnedToBottom by remember(sessionId) { mutableStateOf(true) }
     var scrollToBottomToken by remember(sessionId) { mutableIntStateOf(0) }
     val imeIsVisible = WindowInsets.isImeVisible
@@ -499,7 +500,9 @@ private fun ConversationPage(
                 onUserInteraction = onDismissInput,
                 onPreviewImages = { attachments, initialIndex ->
                     imagePreview = ConversationImagePreviewRequest(attachments, initialIndex)
-                }
+                },
+                imageScope = chatImageScope,
+                onImageClick = { markdownImagePreview = it }
             )
         }
         val showInitialHistoryOverlay = shouldShowInitialHistoryOverlay(
@@ -704,7 +707,9 @@ private fun ConversationTimeline(
     scrollToBottomToken: Int,
     onPinnedToBottomChanged: (Boolean) -> Unit,
     onUserInteraction: () -> Unit,
-    onPreviewImages: (List<GatewayImageAttachment>, Int) -> Unit
+    onPreviewImages: (List<GatewayImageAttachment>, Int) -> Unit,
+    imageScope: ChatImageScope?,
+    onImageClick: (MarkdownImageTap) -> Unit
 ) {
     val latestItems = stateHolder.snapshot.conversation
     val selectedSessionId = stateHolder.snapshot.selectedSessionId
@@ -764,8 +769,7 @@ private fun ConversationTimeline(
             hasHistoryLoadingRow = latestHistoryLoading
         }
     }
-    val chatImageScope = rememberChatImageScope(stateHolder)
-    val markdownPreloader = rememberDshMarkdownPreloader(chatImageScope)
+    val markdownPreloader = rememberDshMarkdownPreloader(imageScope)
     LaunchedEffect(listState, timelineEntries, markdownPreloader) {
         snapshotFlow {
             val visible = listState.layoutInfo.visibleItemsInfo
@@ -964,8 +968,8 @@ private fun ConversationTimeline(
                     is ConversationTimelineEntry.AssistantMarkdown -> DshLazyMarkdownText(
                         markdown = entry.markdown,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        imageScope = chatImageScope,
-                        onImageClick = { markdownImagePreview = it }
+                        imageScope = imageScope,
+                        onImageClick = onImageClick
                     )
                     is ConversationTimelineEntry.AssistantFooter -> Box(
                         Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 12.dp)
