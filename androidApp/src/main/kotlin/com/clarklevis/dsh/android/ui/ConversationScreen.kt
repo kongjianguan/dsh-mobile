@@ -102,6 +102,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.shadow.Shadow
@@ -475,6 +476,7 @@ private fun ConversationPage(
     val sessionId = stateHolder.snapshot.selectedSessionId
     var bottomContentHeight by remember { mutableStateOf(160.dp) }
     var imagePreview by remember(sessionId) { mutableStateOf<ConversationImagePreviewRequest?>(null) }
+    var markdownImagePreview by remember(sessionId) { mutableStateOf<MarkdownImageTap?>(null) }
     var isPinnedToBottom by remember(sessionId) { mutableStateOf(true) }
     var scrollToBottomToken by remember(sessionId) { mutableIntStateOf(0) }
     val imeIsVisible = WindowInsets.isImeVisible
@@ -611,6 +613,13 @@ private fun ConversationPage(
             request = request,
             thumbnails = stateHolder.attachmentThumbnails,
             onDismiss = { imagePreview = null }
+        )
+    }
+    markdownImagePreview?.let { tap ->
+        ConversationZoomImageDialog(
+            tap = tap,
+            imageScope = chatImageScope,
+            onDismiss = { markdownImagePreview = null }
         )
     }
 }
@@ -955,7 +964,8 @@ private fun ConversationTimeline(
                     is ConversationTimelineEntry.AssistantMarkdown -> DshLazyMarkdownText(
                         markdown = entry.markdown,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        imageScope = chatImageScope
+                        imageScope = chatImageScope,
+                        onImageClick = { markdownImagePreview = it }
                     )
                     is ConversationTimelineEntry.AssistantFooter -> Box(
                         Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 12.dp)
@@ -2660,6 +2670,61 @@ internal fun ConversationImagePreviewDialog(
                     textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.size(38.dp))
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ConversationZoomImageDialog(
+    tap: MarkdownImageTap,
+    imageScope: ChatImageScope?,
+    onDismiss: () -> Unit
+) {
+    var image by remember(tap) { mutableStateOf(tap.bitmap.asImageBitmap()) }
+    LaunchedEffect(tap) {
+        val path = tap.relativePath ?: return@LaunchedEffect
+        val scope = imageScope ?: return@LaunchedEffect
+        scope.previewImage(path)?.let { image = it.asImageBitmap() }
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .testTag("markdown-image-preview")
+        ) {
+            ZoomablePreviewImage(image = image, contentDescription = "图片")
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .semantics { contentDescription = "关闭图片预览" },
+                    shape = RoundedCornerShape(19.dp),
+                    color = Color.White.copy(alpha = 0.16f)
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_close),
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = Color.White
+                        )
+                    }
+                }
             }
         }
     }

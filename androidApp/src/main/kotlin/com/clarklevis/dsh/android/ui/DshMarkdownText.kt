@@ -11,6 +11,7 @@ import android.text.TextPaint
 import android.text.style.LeadingMarginSpan
 import android.text.style.MetricAffectingSpan
 import android.util.TypedValue
+import android.view.MotionEvent
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -211,7 +212,8 @@ internal fun DshMarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
-    imageScope: ChatImageScope? = null
+    imageScope: ChatImageScope? = null,
+    onImageClick: ((MarkdownImageTap) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -228,6 +230,7 @@ internal fun DshMarkdownText(
         textSizeSp = textSizeSp,
         lineSpacingExtra = lineSpacingExtra,
         imageScope = imageScope,
+        onImageClick = onImageClick,
         modifier = modifier
     )
 }
@@ -245,7 +248,8 @@ private data class PresentedMarkdown(
 internal fun DshLazyMarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
-    imageScope: ChatImageScope? = null
+    imageScope: ChatImageScope? = null,
+    onImageClick: ((MarkdownImageTap) -> Unit)? = null
 ) {
     val context = LocalContext.current.applicationContext
     val palette = dshMarkdownPalette(compact = false)
@@ -278,6 +282,7 @@ internal fun DshLazyMarkdownText(
         textSizeSp = 16f,
         lineSpacingExtra = with(density) { 4.dp.toPx() },
         imageScope = imageScope,
+        onImageClick = onImageClick,
         modifier = modifier
     )
 }
@@ -290,6 +295,7 @@ private fun DshRenderedMarkdownText(
     textSizeSp: Float,
     lineSpacingExtra: Float,
     imageScope: ChatImageScope?,
+    onImageClick: ((MarkdownImageTap) -> Unit)?,
     modifier: Modifier
 ) {
     val context = LocalContext.current.applicationContext
@@ -315,6 +321,20 @@ private fun DshRenderedMarkdownText(
             textView.setLineSpacing(lineSpacingExtra, 1f)
             textView.setTextColor(palette.textColor)
             textView.setLinkTextColor(palette.linkColor)
+            textView.setOnTouchListener { view, event ->
+                val handler = onImageClick ?: return@setOnTouchListener false
+                if (event.action != MotionEvent.ACTION_UP) {
+                    false
+                } else {
+                    val tap = markdownImageAt(view as AppCompatTextView, event.x, event.y)
+                    if (tap == null) {
+                        false
+                    } else {
+                        handler(tap)
+                        true
+                    }
+                }
+            }
             val nextTag = MarkdownRenderTag(markdown, palette, imageScope?.identity)
             if (textView.tag != nextTag) {
                 markwon.setParsedMarkdown(textView, rendered)
@@ -335,9 +355,10 @@ internal fun DshStreamingAwareMarkdownText(
     markdown: String,
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
-    imageScope: ChatImageScope? = null
+    imageScope: ChatImageScope? = null,
+    onImageClick: ((MarkdownImageTap) -> Unit)? = null
 ) {
-    DshLazyMarkdownText(markdown, modifier, imageScope)
+    DshLazyMarkdownText(markdown, modifier, imageScope, onImageClick)
 }
 
 internal fun buildDshMarkwon(
