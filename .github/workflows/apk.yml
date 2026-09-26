@@ -22,8 +22,12 @@ jobs:
 
       - name: Install Android packages
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMGR" ] || SDKMGR="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager | head -1)"
+          echo "sdkmanager: $SDKMGR"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "platforms;android-36" "build-tools;36.0.0" > /dev/null
 
       - name: Build release APK
         run: ./gradlew :androidApp:assembleRelease --no-daemon --stacktrace
