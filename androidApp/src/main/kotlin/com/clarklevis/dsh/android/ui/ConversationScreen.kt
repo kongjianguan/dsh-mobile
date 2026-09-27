@@ -729,12 +729,13 @@ private fun ConversationTimeline(
     val selectedSessionIsRunning = stateHolder.snapshot.sessions
         .firstOrNull { it.id == selectedSessionId }
         ?.isRunning == true
-    val displayEntries = remember(items) { makeConversationDisplayEntries(items) }
-    val activeStreamingMessageId = remember(items, selectedSessionIsRunning) {
+    val displayEntries = remember(selectedSessionId, items) { makeConversationDisplayEntries(items) }
+    val activeStreamingMessageId = remember(selectedSessionId, items, selectedSessionIsRunning) {
         activeStreamingAssistantMessageId(items, selectedSessionIsRunning)
     }
-    val timelineEntries = remember(displayEntries, activeStreamingMessageId) {
-        makeConversationTimelineEntries(displayEntries, activeStreamingMessageId)
+    val markdownSplitCache = remember(selectedSessionId) { ConversationMarkdownSplitCache() }
+    val timelineEntries = remember(displayEntries, activeStreamingMessageId, markdownSplitCache) {
+        makeConversationTimelineEntries(displayEntries, activeStreamingMessageId, markdownSplitCache)
     }
     val attachmentIdsByTimelineId = remember(timelineEntries) {
         timelineEntries.associate { entry ->

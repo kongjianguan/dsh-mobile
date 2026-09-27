@@ -77,7 +77,7 @@ internal fun HarnessAnimatedBackground(modifier: Modifier = Modifier) {
         while (true) {
             elapsed = ((System.nanoTime() - started) / 1_000_000_000.0 % 4096.0).toFloat()
             liquidGlassFrameSignal?.longValue = (elapsed * 20f).toLong()
-            delay(33)
+            delay(BACKGROUND_FRAME_INTERVAL_MILLISECONDS)
         }
     }
 
@@ -313,6 +313,7 @@ private fun smoothstep(edge0: Float, edge1: Float, value: Float): Float {
 }
 
 private const val WHALE_SAMPLE_SIZE = 72
+private const val BACKGROUND_FRAME_INTERVAL_MILLISECONDS = 67L
 private const val WHALE_VIEWPORT_WIDTH = 24f
 private const val WHALE_VIEWPORT_HEIGHT = 18f
 private const val WHALE_LUMINANCE_THRESHOLD = 0.2f

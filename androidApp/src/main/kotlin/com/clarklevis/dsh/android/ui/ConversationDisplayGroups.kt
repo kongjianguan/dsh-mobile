@@ -75,34 +75,59 @@ internal sealed interface ConversationTimelineEntry {
     }
 }
 
-internal fun makeConversationTimelineEntries(
-    entries: List<ConversationDisplayEntry>,
-    activeStreamingAssistantMessageId: String? = null
-): List<ConversationTimelineEntry> = buildList {
-    entries.forEach { entry ->
-        val item = (entry as? ConversationDisplayEntry.Message)?.item
-        if (
-            item?.kind != ConversationItemKind.ASSISTANT ||
-            item.text.isEmpty()
-        ) {
-            add(ConversationTimelineEntry.Display(entry))
-            return@forEach
-        }
+internal class ConversationMarkdownSplitCache {
+    private data class CachedSplit(val source: String, val chunks: List<String>)
 
-        add(ConversationTimelineEntry.AssistantHeader(item))
-        splitMarkdownForLazyLayout(item.text).forEachIndexed { index, markdown ->
-            add(
-                ConversationTimelineEntry.AssistantMarkdown(
-                    messageId = item.id,
-                    blockIndex = index,
-                    markdown = markdown
-                )
-            )
-        }
-        if (item.id != activeStreamingAssistantMessageId) {
-            add(ConversationTimelineEntry.AssistantFooter(item.id, item.text))
+    private val splitsByMessageId = mutableMapOf<String, CachedSplit>()
+
+    fun chunksFor(item: ConversationItem): List<String> {
+        val cached = splitsByMessageId[item.id]
+        if (cached != null && cached.source === item.text) return cached.chunks
+        return splitMarkdownForLazyLayout(item.text).also { chunks ->
+            splitsByMessageId[item.id] = CachedSplit(item.text, chunks)
         }
     }
+
+    fun retain(messageIds: Set<String>) {
+        splitsByMessageId.keys.retainAll(messageIds)
+    }
+}
+
+internal fun makeConversationTimelineEntries(
+    entries: List<ConversationDisplayEntry>,
+    activeStreamingAssistantMessageId: String? = null,
+    splitCache: ConversationMarkdownSplitCache = ConversationMarkdownSplitCache()
+): List<ConversationTimelineEntry> {
+    val assistantMessageIds = mutableSetOf<String>()
+    val timeline = buildList<ConversationTimelineEntry> {
+        entries.forEach { entry ->
+            val item = (entry as? ConversationDisplayEntry.Message)?.item
+            if (
+                item?.kind != ConversationItemKind.ASSISTANT ||
+                item.text.isEmpty()
+            ) {
+                add(ConversationTimelineEntry.Display(entry))
+                return@forEach
+            }
+
+            assistantMessageIds += item.id
+            add(ConversationTimelineEntry.AssistantHeader(item))
+            splitCache.chunksFor(item).forEachIndexed { index, markdown ->
+                add(
+                    ConversationTimelineEntry.AssistantMarkdown(
+                        messageId = item.id,
+                        blockIndex = index,
+                        markdown = markdown
+                    )
+                )
+            }
+            if (item.id != activeStreamingAssistantMessageId) {
+                add(ConversationTimelineEntry.AssistantFooter(item.id, item.text))
+            }
+        }
+    }
+    splitCache.retain(assistantMessageIds)
+    return timeline
 }
 
 /**

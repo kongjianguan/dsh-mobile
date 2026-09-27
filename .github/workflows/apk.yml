@@ -36,6 +36,9 @@ jobs:
         run: |
           mkdir -p dist
           cp androidApp/build/outputs/apk/release/*.apk "dist/dsh-mobile-${GITHUB_SHA::7}.apk"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          "$SDK/build-tools/36.0.0/apksigner" verify --verbose dist/*.apk
+          "$SDK/build-tools/36.0.0/aapt" dump badging dist/*.apk | grep -E '^(package|application-label):'
           sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
           ls -la dist
 
@@ -48,7 +51,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete apk --yes --cleanup-tag || true
-          gh release create apk dist/*.apk dist/SHA256SUMS.txt \
-            --title "APK build ${GITHUB_SHA::7}" \
-            --notes "Automated build from the build/apk branch of this fork."
+          gh release create "apk-${GITHUB_SHA::7}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            dist/*.apk dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" \
+            --title "APK performance comparison ${GITHUB_SHA::7}" \
+            --notes "Performance comparison build from the build/apk branch. Install alongside the previous APK and pair this app separately."

@@ -8,13 +8,18 @@ import android.net.Uri
 import android.text.Spanned
 import android.widget.TextView
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import com.clarklevis.dsh.android.AndroidSharedStateHolder
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.image.AsyncDrawableSpan
 import io.noties.markwon.image.ImageItem
 import io.noties.markwon.image.SchemeHandler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.commonmark.node.AbstractVisitor
 import org.commonmark.node.Image
@@ -33,9 +38,8 @@ internal class ChatImageScope(
     val workingDirectory: String?,
     val readBytes: suspend (String) -> ByteArray?
 ) {
-    val identity: String = "$sessionId\u0000${workingDirectory.orEmpty()}"
-
     private val cachedBytes = LinkedHashMap<String, ByteArray>(4, 0.75f, true)
+    private val readMutex = Mutex()
 
     fun cacheBytes(path: String, bytes: ByteArray) {
         if (bytes.size > MAXIMUM_CACHED_IMAGE_BYTES) return
@@ -50,11 +54,18 @@ internal class ChatImageScope(
         }
     }
 
+    suspend fun loadBytes(path: String): ByteArray? {
+        synchronized(cachedBytes) { cachedBytes[path] }?.let { return it }
+        return readMutex.withLock {
+            synchronized(cachedBytes) { cachedBytes[path] }
+                ?: readBytes(path)?.also { cacheBytes(path, it) }
+        }
+    }
+
     /** 点开预览时按更大的边长重新解码，取不到原图字节时返回 null。 */
     suspend fun previewImage(path: String): Bitmap? {
-        val cached = synchronized(cachedBytes) { cachedBytes[path] }
-        val bytes = cached ?: readBytes(path)?.also { cacheBytes(path, it) } ?: return null
-        return decodeScaled(bytes, PREVIEW_IMAGE_EDGE_PX)
+        val bytes = loadBytes(path) ?: return null
+        return withContext(Dispatchers.Default) { decodeScaled(bytes, PREVIEW_IMAGE_EDGE_PX) }
     }
 }
 
@@ -92,13 +103,17 @@ internal fun rememberChatImageScope(stateHolder: AndroidSharedStateHolder): Chat
     val workingDirectory = stateHolder.snapshot.sessions
         .firstOrNull { it.id == sessionId }
         ?.cwd
-    return remember(sessionId, workingDirectory) {
+    val scope = remember(stateHolder, sessionId, workingDirectory) {
         sessionId?.let { id ->
             ChatImageScope(id, workingDirectory) { path ->
                 stateHolder.readWorkspaceFileBytes(id, path)
             }
         }
     }
+    DisposableEffect(scope) {
+        onDispose { scope?.let(::releaseDshMarkdownScope) }
+    }
+    return scope
 }
 
 /** markdown 图片目标与工作区相对路径之间的换算。 */
@@ -163,9 +178,8 @@ internal class ChatImageSchemeHandler(
         val relative = uri.path?.removePrefix("/")?.takeIf(String::isNotEmpty)
             ?: throw IllegalStateException("chat image destination is invalid: $raw")
         val bytes = runBlocking {
-            withTimeoutOrNull(IMAGE_READ_TIMEOUT_MILLIS) { scope.readBytes(relative) }
+            withTimeoutOrNull(IMAGE_READ_TIMEOUT_MILLIS) { scope.loadBytes(relative) }
         } ?: throw IllegalStateException("chat image is unavailable: $relative")
-        scope.cacheBytes(relative, bytes)
         val bitmap = decodeScaled(bytes, MAXIMUM_IMAGE_EDGE_PX)
             ?: throw IllegalStateException("chat image cannot be decoded: $relative")
         return ImageItem.withResult(BitmapDrawable(context.resources, bitmap))
@@ -177,7 +191,7 @@ private fun decodeScaled(bytes: ByteArray, maxEdgePx: Int): Bitmap? {
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sampleSize = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= maxEdgePx) {
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > maxEdgePx) {
         sampleSize *= 2
     }
     return BitmapFactory.decodeByteArray(

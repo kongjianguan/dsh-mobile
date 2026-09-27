@@ -43,6 +43,7 @@ import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableTheme
 import io.noties.markwon.ext.tasklist.TaskListPlugin
 import io.noties.markwon.html.HtmlPlugin
+import io.noties.markwon.image.AsyncDrawableSpan
 import io.noties.markwon.image.ImagesPlugin
 import io.noties.markwon.movement.MovementMethodPlugin
 import org.commonmark.node.Code
@@ -70,14 +71,16 @@ internal data class DshMarkdownPalette(
 private data class MarkdownRenderTag(
     val source: String,
     val palette: DshMarkdownPalette,
-    val imageIdentity: String?
+    val imageScope: ChatImageScope?
 )
 
 private data class MarkdownRenderCacheKey(
     val source: String,
     val palette: DshMarkdownPalette,
-    val imageIdentity: String?
+    val imageScope: ChatImageScope?
 )
+
+private data class CachedMarkdown(val rendered: Spanned, val imageSpans: Int)
 
 /**
  * LazyColumn 会在长会话滚动时销毁并重新创建离屏 TextView。缓存不可变的 Spanned，避免每次
@@ -85,31 +88,58 @@ private data class MarkdownRenderCacheKey(
  */
 private object DshMarkdownRenderCache {
     private const val MAX_SOURCE_CHARACTERS = 512_000
-    private val values = LinkedHashMap<MarkdownRenderCacheKey, Spanned>(16, 0.75f, true)
+    private const val MAX_IMAGE_SPANS = 4
+    private const val MAX_ENTRIES = 256
+    private val values = LinkedHashMap<MarkdownRenderCacheKey, CachedMarkdown>(16, 0.75f, true)
     private var sourceCharacters = 0
+    private var imageSpans = 0
 
     @Synchronized
-    fun get(source: String, palette: DshMarkdownPalette, imageIdentity: String?): Spanned? =
-        values[MarkdownRenderCacheKey(source, palette, imageIdentity)]
+    fun get(source: String, palette: DshMarkdownPalette, imageScope: ChatImageScope?): Spanned? =
+        values[MarkdownRenderCacheKey(source, palette, imageScope)]?.rendered
 
     @Synchronized
     fun put(
         source: String,
         palette: DshMarkdownPalette,
-        imageIdentity: String?,
+        imageScope: ChatImageScope?,
         rendered: Spanned
     ): Spanned {
-        val key = MarkdownRenderCacheKey(source, palette, imageIdentity)
-        values.remove(key)?.let { sourceCharacters -= key.source.length }
+        val key = MarkdownRenderCacheKey(source, palette, imageScope)
+        values.remove(key)?.let {
+            sourceCharacters -= key.source.length
+            imageSpans -= it.imageSpans
+        }
         val immutable = SpannedString(rendered)
-        values[key] = immutable
+        val count = immutable.getSpans(0, immutable.length, AsyncDrawableSpan::class.java).size
+        values[key] = CachedMarkdown(immutable, count)
         sourceCharacters += source.length
+        imageSpans += count
         val iterator = values.entries.iterator()
-        while (sourceCharacters > MAX_SOURCE_CHARACTERS && iterator.hasNext()) {
-            sourceCharacters -= iterator.next().key.source.length
+        while (
+            (sourceCharacters > MAX_SOURCE_CHARACTERS ||
+                imageSpans > MAX_IMAGE_SPANS ||
+                values.size > MAX_ENTRIES) && iterator.hasNext()
+        ) {
+            val entry = iterator.next()
+            sourceCharacters -= entry.key.source.length
+            imageSpans -= entry.value.imageSpans
             iterator.remove()
         }
         return immutable
+    }
+
+    @Synchronized
+    fun remove(imageScope: ChatImageScope) {
+        val iterator = values.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key.imageScope === imageScope) {
+                sourceCharacters -= entry.key.source.length
+                imageSpans -= entry.value.imageSpans
+                iterator.remove()
+            }
+        }
     }
 }
 
@@ -117,21 +147,22 @@ private fun renderedMarkdown(
     markwon: Markwon,
     markdown: String,
     palette: DshMarkdownPalette,
-    imageIdentity: String?
-): Spanned = DshMarkdownRenderCache.get(markdown, palette, imageIdentity)
+    imageScope: ChatImageScope?
+): Spanned = DshMarkdownRenderCache.get(markdown, palette, imageScope)
     ?: DshMarkdownRenderCache.put(
         markdown,
         palette,
-        imageIdentity,
+        imageScope,
         markwon.toMarkdown(markdown)
     )
 
 /** Markwon 的 TablePlugin 带有可变 visitor，只在单独的后台线程串行解析。 */
 private object DshAsyncMarkdownRenderer {
-    private val dispatcher = Executors.newSingleThreadExecutor { runnable ->
+    private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "dsh-markdown-renderer").apply { priority = Thread.MIN_PRIORITY }
-    }.asCoroutineDispatcher()
-    private val markwons = mutableMapOf<MarkwonKey, Markwon>()
+    }
+    private val dispatcher = executor.asCoroutineDispatcher()
+    private val markwons = LinkedHashMap<MarkwonKey, Markwon>(4, 0.75f, true)
 
     suspend fun render(
         context: Context,
@@ -139,21 +170,36 @@ private object DshAsyncMarkdownRenderer {
         palette: DshMarkdownPalette,
         imageScope: ChatImageScope?
     ): Spanned = withContext(dispatcher) {
-        DshMarkdownRenderCache.get(markdown, palette, imageScope?.identity) ?: renderedMarkdown(
-            markwon = markwons.getOrPut(MarkwonKey(palette, imageScope?.identity)) {
+        DshMarkdownRenderCache.get(markdown, palette, imageScope) ?: renderedMarkdown(
+            markwon = markwons.getOrPut(MarkwonKey(palette, imageScope)) {
                 buildDshMarkwon(context, palette, imageScope)
-            },
+            }.also { trimMarkwonCache(markwons) },
             markdown = markdown,
             palette = palette,
-            imageIdentity = imageScope?.identity
+            imageScope = imageScope
         )
+    }
+
+    fun release(imageScope: ChatImageScope) {
+        executor.execute {
+            markwons.keys.removeAll { it.imageScope === imageScope }
+            DshMarkdownRenderCache.remove(imageScope)
+        }
     }
 }
 
 private data class MarkwonKey(
     val palette: DshMarkdownPalette,
-    val imageIdentity: String?
+    val imageScope: ChatImageScope?
 )
+
+private const val MAX_CACHED_MARKWONS = 4
+
+private fun trimMarkwonCache(markwons: MutableMap<MarkwonKey, Markwon>) {
+    while (markwons.size > MAX_CACHED_MARKWONS) {
+        markwons.remove(markwons.keys.first())
+    }
+}
 
 internal class DshMarkdownPreloader internal constructor(
     private val context: Context,
@@ -171,20 +217,31 @@ internal class DshMarkdownPreloader internal constructor(
 internal fun rememberDshMarkdownPreloader(imageScope: ChatImageScope? = null): DshMarkdownPreloader {
     val context = LocalContext.current.applicationContext
     val palette = dshMarkdownPalette(compact = false)
-    return remember(context, palette, imageScope?.identity) {
+    return remember(context, palette, imageScope) {
         DshMarkdownPreloader(context, palette, imageScope)
     }
 }
 
 /** 主线程只共享实例执行轻量的 TextView 插件回调，不参与 LazyColumn 的 Markdown 解析。 */
 private object DshMarkdownTextApplier {
-    private val markwons = mutableMapOf<MarkwonKey, Markwon>()
+    private val markwons = LinkedHashMap<MarkwonKey, Markwon>(4, 0.75f, true)
 
     @Synchronized
     fun get(context: Context, palette: DshMarkdownPalette, imageScope: ChatImageScope?): Markwon =
-        markwons.getOrPut(MarkwonKey(palette, imageScope?.identity)) {
+        markwons.getOrPut(MarkwonKey(palette, imageScope)) {
             buildDshMarkwon(context, palette, imageScope)
-        }
+        }.also { trimMarkwonCache(markwons) }
+
+    @Synchronized
+    fun release(imageScope: ChatImageScope) {
+        markwons.keys.removeAll { it.imageScope === imageScope }
+    }
+}
+
+internal fun releaseDshMarkdownScope(imageScope: ChatImageScope) {
+    DshMarkdownRenderCache.remove(imageScope)
+    DshMarkdownTextApplier.release(imageScope)
+    DshAsyncMarkdownRenderer.release(imageScope)
 }
 
 @Composable
@@ -218,14 +275,14 @@ internal fun DshMarkdownText(
     val context = LocalContext.current
     val density = LocalDensity.current
     val palette = dshMarkdownPalette(compact)
-    val markwon = remember(context.applicationContext, palette, imageScope?.identity) {
+    val markwon = remember(context.applicationContext, palette, imageScope) {
         DshMarkdownTextApplier.get(context.applicationContext, palette, imageScope)
     }
     val textSizeSp = if (compact) 14f else 16f
     val lineSpacingExtra = with(density) { (if (compact) 2.dp else 4.dp).toPx() }
     DshRenderedMarkdownText(
         markdown = markdown,
-        rendered = renderedMarkdown(markwon, markdown, palette, imageScope?.identity),
+        rendered = renderedMarkdown(markwon, markdown, palette, imageScope),
         palette = palette,
         textSizeSp = textSizeSp,
         lineSpacingExtra = lineSpacingExtra,
@@ -253,19 +310,18 @@ internal fun DshLazyMarkdownText(
 ) {
     val context = LocalContext.current.applicationContext
     val palette = dshMarkdownPalette(compact = false)
-    val imageIdentity = imageScope?.identity
-    val markwon = remember(context, palette, imageIdentity) {
+    val markwon = remember(context, palette, imageScope) {
         DshMarkdownTextApplier.get(context, palette, imageScope)
     }
-    var presented by remember(palette, imageIdentity) {
+    var presented by remember(palette, imageScope) {
         mutableStateOf(
             PresentedMarkdown(
                 source = markdown,
-                rendered = renderedMarkdown(markwon, markdown, palette, imageIdentity)
+                rendered = renderedMarkdown(markwon, markdown, palette, imageScope)
             )
         )
     }
-    LaunchedEffect(context, markdown, palette, imageIdentity) {
+    LaunchedEffect(context, markdown, palette, imageScope) {
         if (presented.source != markdown) {
             presented = PresentedMarkdown(
                 source = markdown,
@@ -299,7 +355,7 @@ private fun DshRenderedMarkdownText(
     modifier: Modifier
 ) {
     val context = LocalContext.current.applicationContext
-    val markwon = remember(context, palette, imageScope?.identity) {
+    val markwon = remember(context, palette, imageScope) {
         DshMarkdownTextApplier.get(context, palette, imageScope)
     }
     AndroidView(
@@ -335,7 +391,7 @@ private fun DshRenderedMarkdownText(
                     }
                 }
             }
-            val nextTag = MarkdownRenderTag(markdown, palette, imageScope?.identity)
+            val nextTag = MarkdownRenderTag(markdown, palette, imageScope)
             if (textView.tag != nextTag) {
                 markwon.setParsedMarkdown(textView, rendered)
                 textView.tag = nextTag
